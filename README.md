@@ -1,5 +1,5 @@
 # 16SBenchmarking
-Files for the Faits et al. 16S pipeline benchmarking paper
+Files for the Faits and Odom-Mabey et al. 16S pipeline benchmarking paper
 
 
 SILVA files: 
