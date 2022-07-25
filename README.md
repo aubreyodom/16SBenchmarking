@@ -12,7 +12,7 @@ This respository contains and links to relevant files for the Faits and Odom-Mab
 - PathoScope SILVA indices were custom-configured, and are available in this repository in the folder "PS_SILVA."
 
 ### Kraken Standard
-- The Kraken Standard library was originally downloaded on 8/20/2020. This library may be downloaded from the [Index Zone.](https://benlangmead.github.io/aws-indexes/k2) under the header "Older Kraken 2 / Bracken Refseq indexes." The relevant Standard library is listed under the date 9/19/2020.
+- The Kraken Standard library was originally downloaded on 8/20/2020. This library may be downloaded from the [Index Zone](https://benlangmead.github.io/aws-indexes/k2) under the header "Older Kraken 2 / Bracken Refseq indexes." The relevant Standard library is listed under the date 9/19/2020.
 - Note that this library is comparable to the PathoScope RefSeq 2020 library used in the paper.
 
 ### Greengenes 13_8
