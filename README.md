@@ -1,5 +1,5 @@
 
-# Benchmarking analysis pipelines and reference libraries for profiling 16S amplicon sequencing data using mock microbial communities
+# Metagenomic profiling pipelines improve taxonomic classification for 16S amplicon sequencing data
 
 This respository contains and links to relevant files for the Faits and Odom-Mabey et al. 16S pipeline benchmarking paper.
 
