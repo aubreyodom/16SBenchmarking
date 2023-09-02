@@ -1,0 +1,1451 @@
+---
+title: "Assess Accuracy (Version 2)"
+author: "Aubrey Odom"
+date: "6/12/2022"
+output:
+    html_document:
+      toc: true
+      toc_depth: 6
+      number_sections: true
+      code_folding: hide
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Setup
+```{R setup}
+suppressPackageStartupMessages({
+  # Data processing
+  library(knitr)
+  library(reshape2)
+  library(tidyverse)
+  library(magrittr)
+  # devtools::install_github("jbisanz/qiime2R")
+  library(qiime2R)
+  # Modeling
+  library(lme4)
+  # Plotting
+  library(ggplot2)
+  library(lsmeans)
+  library(paletteer)
+  library(ggsci)
+  library(gridExtra)
+  # Tyler analyses
+  library(vegan)
+  library(coda.base)
+  library(S4Vectors)
+})
+```
+
+# Load data
+```{R}
+stem <- "/restricted/projectnb/pathoscope/work/"
+GroundTruth <- readRDS(
+  paste0(stem, "/", "aubrey/Tyler_16S_paper/GroundTruth.RDS"))
+
+# Create metadata
+libnames <- c("Fouhy_V1_V2", "Fouhy_V4_V5", "Karstens", "Kozich", "Lluch")
+get_metadata <- function(lib) {
+  stem2 <- "~/MethodsAnalyses/Qiime2/SilvaResults"
+  this_lib <- str_split(lib, "_")[[1]][1]
+  counts <- qiime2R::read_qza(paste0(stem2, "/", lib, "/table.qza")) %>%
+    .$data %>% as.data.frame()
+  samp_names <- colnames(counts)
+  tibble(DataSource = this_lib, Sample = samp_names)
+}
+```
+
+## Create metaData
+```{R}
+metaData <- lapply(libnames, get_metadata) %>%
+  data.table::rbindlist() %>%
+  as.data.frame() 
+
+metaData$Sample %<>%
+  str_replace_all("-", "_") %>%
+  str_replace_all("\\.", "_") %>%
+  ifelse(test = stringr::str_starts(., "[0-9]+"),
+         yes = paste0("X", .), no = .)
+rownames(metaData) <- metaData$Sample
+    
+ind <- match(colnames(GroundTruth$Genus), metaData$Sample)
+metaData <- metaData[ind, ]
+```
+
+## GroundTruth - Raw counts
+```{R}
+GT_raw <- readxl::read_xlsx("GroundTruth.xlsx") %>%
+  unite(col = "Species", Genus, Species, remove = FALSE) %>%
+  relocate(Genus, Species)
+
+GroundRaw <- vector(mode = "list", length = 2)
+names(GroundRaw) <- c("Genus", "Species")
+
+counts_only <- GT_raw[, -c(1:6)]
+GroundRaw$Genus <- counts_only %>%
+  bind_cols(Genus = GT_raw$Genus, .) %>%
+  group_by(Genus) %>%
+  summarise(across(.fns = sum)) %>%
+  as.data.frame() %>%
+  magrittr::set_rownames(.$Genus) %>%
+  select(-Genus)
+
+GroundRaw$Species <- counts_only %>%
+  bind_cols(Species = GT_raw$Species, .) %>%
+  group_by(Species) %>%
+  summarise(across(.fns = sum)) %>%
+  as.data.frame() %>%
+  magrittr::set_rownames(.$Species) %>%
+  select(-Species)
+
+for (taxon in names(GroundRaw)) {
+  GroundRaw[[taxon]] %<>% as.data.frame()
+    colnames(GroundRaw[[taxon]]) %<>%
+      str_replace_all("-", "_") %>%
+      str_replace_all("\\.", "_") %>%
+      ifelse(test = stringr::str_starts(., "[0-9]+"),
+             yes = paste0("X", .), no = .)
+    
+    ind <- match(colnames(GroundTruth[[taxon]]),
+                 colnames(GroundRaw[[taxon]]))
+    GroundRaw[[taxon]] <-
+      GroundRaw[[taxon]][order(rownames(GroundRaw[[taxon]])), ind] %>%
+      as.matrix()
+    
+    GroundRaw[[taxon]][is.na(GroundRaw[[taxon]])] <- 0
+}
+```
+
+## Pipeline assignments
+```{R}
+mockData <- list(Genus = list(), Species = list())
+setwd("~/pathoscope/work/tyler/MethodsAnalyses/FinalRDSFiles")
+
+# DADA 2 ----
+mockData$Genus$DADA2_Silva <- readRDS("DADA2_Silva_G.RDS")
+mockData$Species$DADA2_Silva <- readRDS("DADA2_Silva_S.RDS")
+
+# Qiime 2 ----
+
+# Silva
+mockData$Genus$Qiime_Silva <- readRDS("Qiime2_Silva_G.RDS")
+mockData$Species$Qiime_Silva <- readRDS("Qiime2_Silva_G.RDS")
+
+# Greengenes
+mockData$Genus$Qiime_GG <- readRDS("Qiime2_GG_G.RDS")
+mockData$Species$Qiime_GG <- readRDS("Qiime2_GG_S.RDS")
+
+# PathoScope ----
+
+# Silva
+mockData$Genus$PS_Silva <- readRDS("PS_Silva_g.RDS")
+mockData$Species$PS_Silva <- readRDS("PS_Silva_s.RDS")
+
+# Greengenes
+mockData$Genus$PS_GG <- readRDS("PS_Green_G.RDS")
+mockData$Species$PS_GG <- readRDS("PS_Green_S.RDS")
+
+# RS 2018
+mockData$Genus$PS_RefSeq2018 <- readRDS("PS_Ref2018_G.RDS")
+mockData$Species$PS_RefSeq2018 <- readRDS("PS_Ref2018_S.RDS")
+
+# RS 2020
+mockData$Genus$PS_RefSeq2020 <- readRDS("PS_Ref2020_G.RDS")
+mockData$Species$PS_RefSeq2020 <- readRDS("PS_Ref2020_S.RDS")
+
+# Kraken ----
+
+# Greengenes
+mockData$Genus$Kraken_GG <- readRDS("Kraken_Greengenes_G.RDS")
+mockData$Species$Kraken_GG <- readRDS("Kraken_Greengenes_S.RDS")
+
+# Silva
+mockData$Genus$Kraken_Silva <- readRDS("Kraken_Silva_G.RDS")
+mockData$Species$Kraken_Silva <- readRDS("Kraken_Silva_G.RDS")
+# The Silva library does not output species-level calls,
+# so Mothur's genus output is the same as species.
+
+# RS 2020
+mockData$Genus$Kraken_Std <- readRDS("Kraken_Standard_G.RDS")
+mockData$Species$Kraken_Std <- readRDS("Kraken_Standard_S.RDS")
+
+# Mothur ----
+
+# Silva
+mockData$Genus$Mothur_Silva <- readRDS("Mothur_G.RDS")
+mockData$Species$Mothur_Silva <- readRDS("Mothur_G.RDS")
+# The Silva library does not output species-level calls,
+# so Mothur's genus output is the same as species.
+```
+# Preprocessing data
+
+## Fix sample names and order
+Each table needs to have the same sample names and have them in the same order.
+Tables do not need to share the same rownames (taxa); if there are missing organisms compared to the ground truth, then rows of all 0's will be added.
+```{R}
+for (taxon in names(mockData)) {
+  for (pipeline in names(mockData[[taxon]])) {
+    mockData[[taxon]][[pipeline]] %<>% as.data.frame()
+    colnames(mockData[[taxon]][[pipeline]]) %<>%
+      str_replace_all("-", "_") %>%
+      str_replace_all("\\.", "_") %>%
+      ifelse(test = stringr::str_starts(., "[0-9]+"),
+             yes = paste0("X", .), no = .)
+    
+    ind <- match(colnames(GroundTruth[[taxon]]),
+                 colnames(mockData[[taxon]][[pipeline]]))
+    mockData[[taxon]][[pipeline]] <-
+               mockData[[taxon]][[pipeline]][ind]
+  }
+}
+# Test that all rows are equal
+#apply(sapply(mockData$Genus, colnames), 1, function(x) length(unique(x)) == 1)
+# Test that all elements are equal to ground truth samples
+#apply(sapply(mockData$Genus, colnames), 1, unique) == colnames(GroundTruth$Genus)
+```
+
+## Process taxon names
+```{R}
+for (tax_level in names(mockData)) {
+  for(method in names(mockData[[tax_level]])) {
+    fixedsums <- rownames(mockData[[tax_level]][[method]]) %>%
+      stringr::str_replace_all("^$", "Unknown") %>%
+      stringr::str_replace_all("-", "_") %>%
+      stringr::str_replace_all(" ", "_") %>%
+      stringr::str_remove_all("\\[") %>%
+      stringr::str_remove_all("\\]") %>%
+      bind_cols(as_tibble(mockData[[tax_level]][[method]])) %>%
+      group_by(`...1`) %>%
+      summarise(across(everything(), sum), .groups = "drop")
+    mockData[[tax_level]][[method]] <- fixedsums %>%
+      select(-c(`...1`)) %>% as.data.frame()
+    rownames(mockData[[tax_level]][[method]]) <- fixedsums$`...1`
+    # print(rownames(mockData[[tax_level]][[method]]))
+    }
+}
+```
+
+## Propionibacterium_acnes -> Cutibacterium_acnes
+```{R}
+# Update GroundTruth
+ind <- rownames(GroundTruth$Species) == "Propionibacterium_acnes"
+rownames(GroundTruth$Species)[ind] <- "Cutibacterium_acnes"
+
+# Update mockData
+for(pipeline in names(mockData$Species)){
+  if("Propionibacterium_acnes" %in% rownames(mockData$Species[[pipeline]])){
+    if("Cutibacterium" %in% rownames(mockData$Genus[[pipeline]])){
+      mockData$Genus[[pipeline]]["Cutibacterium",] <- 
+        mockData$Genus[[pipeline]]["Cutibacterium",] +
+        mockData$Genus[[pipeline]]["Propionibacterium",]
+    } else {
+      mockData$Genus[[pipeline]]["Cutibacterium",] <-
+        mockData$Genus[[pipeline]]["Propionibacterium",]
+    }
+    if("Cutibacterium_acnes" %in% rownames(mockData$Species[[pipeline]])){
+      mockData$Species[[pipeline]]["Cutibacterium_acnes",] <- mockData$Species[[pipeline]]["Cutibacterium_acnes",] + mockData$Species[[pipeline]]["Propionibacterium_acnes",]
+    } else {
+      mockData$Species[[pipeline]]["Cutibacterium_acnes",] <- mockData$Species[[pipeline]]["Propionibacterium_acnes",]
+    }
+    ind <- which(rownames(mockData$Genus[[pipeline]]) =="Propionibacterium")
+    mockData$Genus[[pipeline]] <- mockData$Genus[[pipeline]][-ind,]
+    ind <- which(rownames(
+      mockData$Species[[pipeline]]) == "Propionibacterium_acnes")
+    mockData$Species[[pipeline]] <- mockData$Species[[pipeline]][-ind,]
+  }
+}
+```
+
+## Xanthomonas
+Since the Xanthomonas species is not known in the source, any Xanthomonas call should be considered a good species call.
+```{R}
+for(pipeline in names(mockData$Species)){ 
+  tmp <- apply(mockData$Species[[pipeline]][grep("Xanthomonas",rownames(mockData$Species[[pipeline]])),],2,sum)
+  mockData$Species[[pipeline]] <- mockData$Species[[pipeline]][!grepl("Xanthomonas",rownames(mockData$Species[[pipeline]])),]
+  mockData$Species[[pipeline]] <- rbind(mockData$Species[[pipeline]],tmp)
+  rownames(mockData$Species[[pipeline]])[nrow(mockData$Species[[pipeline]])] <- "Xanthomonas_g_Xanthomonas"
+}
+```
+
+## Deinococcus thermus
+There are several names for "Deinococcus Thermus" that need to be corrected.
+```{R}
+#rownames(mockData$Phylum$Qiime_GG)[rownames(mockData$Phylum$Qiime_GG)=="[Thermi]"] <- #"Deinococcus-Thermus"
+#rownames(mockData$Phylum$Kraken_GG)[rownames(mockData$Phylum$Kraken_GG)=="[Thermi]"] <- #"Deinococcus-Thermus"
+#rownames(mockData$Phylum$PS_GG)[rownames(mockData$Phylum$PS_GG)=="[Thermi]"] <- "Deinococcus-Thermus"
+#rownames(mockData$Phylum$PS_Silva)[rownames(mockData$Phylum$PS_Silva)=="Deinococcota"] <- #"Deinococcus-Thermus"
+```
+
+## Proteobacteria
+There are cases where "delta/epsilon subdivisions" needs to be replaced with its parent phylum, "Proteobacteria".
+```{R}
+mockData$Phylum$PS_RefSeq2020["Proteobacteria",] <- mockData$Phylum$PS_RefSeq2020["Proteobacteria",] + mockData$Phylum$PS_RefSeq2020["delta/epsilon subdivisions",]
+mockData$Phylum$PS_RefSeq2020 <- mockData$Phylum$PS_RefSeq2020[rownames(mockData$Phylum$PS_RefSeq2020) != "delta/epsilon subdivisions",]
+mockData$Phylum$PS_RefSeq2018["Proteobacteria",] <- mockData$Phylum$PS_RefSeq2018["Proteobacteria",] + mockData$Phylum$PS_RefSeq2018["delta/epsilon subdivisions",]
+mockData$Phylum$PS_RefSeq2018 <- mockData$Phylum$PS_RefSeq2018[rownames(mockData$Phylum$PS_RefSeq2018) != "delta/epsilon subdivisions",]
+```
+
+## Bacteroides vulgatus
+"Phocaeicola_vulgatus" is an alias for Bacteroides_vulgatus in Kraken's StandardDB
+```{R}
+rownames(mockData$Species$Kraken_Std)[rownames(mockData$Species$Kraken_Std) == "Phocaeicola_vulgatus"] <- "Bacteroides_vulgatus"
+```
+
+## Acinetobacter_baumannii
+"Acinetobacter_calcoaceticus/baumannii" needs to count as correct for Acinetobacter_baumannii in PS2018 and PS2020
+```{R}
+rownames(mockData$Species$PS_RefSeq2018)[rownames(mockData$Species$PS_RefSeq2018) == "Acinetobacter_calcoaceticus/baumannii"] <- "Acinetobacter_baumannii"
+rownames(mockData$Species$PS_RefSeq2020)[rownames(mockData$Species$PS_RefSeq2020) == "Acinetobacter_calcoaceticus/baumannii"] <- "Acinetobacter_baumannii"
+```
+
+## Actinomyces_odontolyticus
+"Schaalia_odontolytica" is a homotypic synonym of "Actinomyces_odontolyticus"
+```{R}
+rownames(mockData$Species$PS_RefSeq2020)[rownames(mockData$Species$PS_RefSeq2020) == "Schaalia_odontolytica"] <- "Actinomyces_odontolyticus"
+rownames(mockData$Species$PS_RefSeq2018)[rownames(mockData$Species$PS_RefSeq2018) == "Schaalia_odontolytica"] <- "Actinomyces_odontolyticus"
+rownames(mockData$Species$PS_Silva)[rownames(mockData$Species$PS_Silva) == "Schaalia_odontolytica"] <- "Actinomyces_odontolyticus"
+rownames(mockData$Species$Kraken_Std)[rownames(mockData$Species$Kraken_Std) == "Schaalia_odontolytica"] <- "Actinomyces_odontolyticus"
+mockData$Genus$PS_RefSeq2020["Actinomyces",] <- mockData$Genus$PS_RefSeq2020["Actinomyces",] + mockData$Genus$PS_RefSeq2020["Schaalia",]
+mockData$Genus$PS_RefSeq2020 <- mockData$Genus$PS_RefSeq2020[rownames(mockData$Genus$PS_RefSeq2020)!="Schaalia",]
+mockData$Genus$PS_RefSeq2018["Actinomyces",] <- mockData$Genus$PS_RefSeq2018["Actinomyces",] + mockData$Genus$PS_RefSeq2018["Schaalia",]
+mockData$Genus$PS_RefSeq2018 <- mockData$Genus$PS_RefSeq2018[rownames(mockData$Genus$PS_RefSeq2018)!="Schaalia",]
+mockData$Genus$Kraken_Std["Actinomyces",] <- mockData$Genus$Kraken_Std["Actinomyces",] + mockData$Genus$Kraken_Std["Schaalia",]
+mockData$Genus$Kraken_Std <- mockData$Genus$Kraken_Std[rownames(mockData$Genus$Kraken_Std)!="Schaalia",]
+```
+
+## Pseudoramibacter_Eubacterium with Eubacterium
+```{R}
+for(taxLevel in names(mockData)){
+  for(pipeline in names(mockData[[taxLevel]])){
+    these_names <- rownames(mockData[[taxLevel]][[pipeline]]) 
+    newnames <- str_replace_all(these_names, "Pseudoramibacter_Eubacterium",
+                                "Eubacterium")
+    out <- bind_cols(names = newnames, mockData[[taxLevel]][[pipeline]]) %>%
+      group_by(names) %>% summarise(across(.fns = sum)) %>% as.data.frame() %>%
+      magrittr::set_rownames(.$names) %>% select(-c(names))
+    mockData[[taxLevel]][[pipeline]] <- out
+  }
+}
+```
+
+## Replace . with underscores in sample names
+```{R}
+for(taxLevel in names(mockData)){
+  for(pipeline in names(mockData[[taxLevel]])){
+    mockData[[taxLevel]][[pipeline]] <- mockData[[taxLevel]][[pipeline]][,order(colnames(mockData[[taxLevel]][[pipeline]]))]
+    colnames(mockData[[taxLevel]][[pipeline]]) <- gsub("\\.","_",colnames(mockData[[taxLevel]][[pipeline]]))
+  }
+}
+```
+
+## Number of taxa at each level
+```{R}
+cols <- names(mockData)
+# Just to get names of all samples
+rows <- names(mockData$Genus)
+countSize <- matrix(0, nrow = length(rows), ncol = length(cols),
+                    dimnames = list(rows, cols))
+for(pipeline in rownames(countSize)){
+  for(taxLevel in colnames(countSize)){
+    countSize[pipeline,taxLevel] <- nrow(mockData[[taxLevel]][[pipeline]])
+  }
+}
+
+kable(countSize)
+```
+
+## Size of libraries
+```{R}
+rows <- names(mockData$Genus)
+cols <- colnames(mockData$Genus$Qiime_Silva)
+libSize <- matrix(0, nrow = length(rows), ncol = length(cols),
+                  dimnames = list(rows, cols))
+
+for(pipeline in rows){
+  libSize[pipeline, ] <- apply(mockData$Genus[[pipeline]], 2, sum)
+}
+
+kable(libSize, caption = "Library size")
+
+rowMeans(libSize)
+```
+## ID failed runs
+
+Identify which runs failed - find outputs with < 1000 or < 10000 counts?
+```{R}
+for(pipeline in rownames(libSize)){
+  for(sampName in colnames(libSize)){
+    if(libSize[pipeline,sampName] < 10000){
+      print(paste(pipeline, sampName, libSize[pipeline, sampName], sep = ":"))
+    }
+  }
+}
+```
+
+# Convert to CPM
+```{R}
+mockCPM <- list()
+for(taxLevel in names(mockData)){
+  mockCPM[[taxLevel]] <- list()
+  for(pipeline in names(mockData[[taxLevel]])){
+    mockCPM[[taxLevel]][[pipeline]] <- t(t(mockData[[taxLevel]][[pipeline]]) / apply(mockData[[taxLevel]][[pipeline]], 2, sum))*1000000
+    mockCPM[[taxLevel]][[pipeline]] <- as.data.frame(mockCPM[[taxLevel]][[pipeline]])
+  }
+}
+
+mockCPM_Clean <- mockCPM
+#mockCPM_Clean <- mockCPM
+#for(taxLevel in names(mockCPM_Clean)){
+#  for(pipeline in names(mockCPM_Clean[[taxLevel]])){
+#    mockCPM_Clean[[taxLevel]][[pipeline]] <- 
+#      mockCPM_Clean[[taxLevel]][[pipeline]][!grepl("^._", #rownames(mockCPM_Clean[[taxLevel]][[pipeline]])),]
+#    mockCPM_Clean[[taxLevel]][[pipeline]] <- #t(t(mockCPM_Clean[[taxLevel]][[pipeline]])/(apply(mockCPM_Clean[[taxLevel]][[pipeline]],2,#sum)+0.1))*1000000
+#  }
+#}
+
+```
+
+## Fix Xanthomonas
+```{R}
+for(pipeline in names(mockCPM_Clean$Species)){
+  tmp <- NA
+  if("Xanthomonas_g_Xanthomonas" %in% rownames(mockCPM_Clean$Species[[pipeline]])){
+    tmp <- mockCPM_Clean$Species[[pipeline]]["Xanthomonas_g_Xanthomonas",]
+  }
+  mockCPM_Clean$Species[[pipeline]] <- mockCPM_Clean$Species[[pipeline]][!grepl("_g_",rownames(mockCPM_Clean[[taxLevel]][[pipeline]])),]
+  if(length(tmp)>1){
+    mockCPM_Clean$Species[[pipeline]] <- rbind(mockCPM_Clean$Species[[pipeline]],tmp)
+    rownames(mockCPM_Clean$Species[[pipeline]])[nrow(mockCPM_Clean$Species[[pipeline]])] <- "Xanthomonas_g_Xanthomonas"
+  }
+  mockCPM_Clean[[taxLevel]][[pipeline]] <- t(t(mockCPM_Clean[[taxLevel]][[pipeline]])/(apply(mockCPM_Clean[[taxLevel]][[pipeline]],2,sum)+0.1))*1000000
+}
+
+```
+
+# Plot relative abundance (Aubrey)
+
+## Functions to clean data
+```{R}
+# Obtain species
+all_species <- mockData$Species
+
+clean_species <- function(input, pipeline, Data_starts) {
+  input %>%
+  as.data.frame() %>%
+  select(starts_with(Data_starts)) %>%
+  filter_all(any_vars(. != 0)) %>%
+  rownames_to_column(var = "Species") %>%
+  mutate(Species = stringr::str_remove(Species, "\\["),
+         Species = stringr::str_remove(Species, "\\]"),
+         Species = stringr::str_replace_all(Species, "_", " "),
+         Pipeline = pipeline)
+}
+
+# Clean pipeline assignments
+clean_double <- function(name_in, Data_starts) {
+  clean_species(input = all_species[[name_in]], pipeline = name_in,
+                Data_starts = Data_starts)
+}
+
+# Standard function for getting data
+create_dat <- function(inputdat, patho_n = "PathoScope") {
+  inputdat %>%
+   tidyr::separate(col = "Pipeline", into = c("Software", "Reference Library"),
+                   remove = FALSE) %>%
+ mutate(Software = factor(Software, # Rename all pipelines
+                          levels = c("Qiime", "Mothur", "Kraken", "PS", "DADA2"),
+                          labels = c("QIIME 2", "Mothur", "Kraken 2", patho_n, "DADA2"))) %>%
+    mutate(`Reference Library` = factor(
+           `Reference Library`, # Rename all databases
+           levels = c("GG", "Silva", "Std", "RefSeq2018", "RefSeq2020"),
+           labels = c("Greengenes", "SILVA", "Kraken Std.", "RefSeq 2018",
+              "RefSeq 2020"))) %>%
+    mutate(`Pipeline & Reference Library` = paste(Software, "&", `Reference Library`))
+}
+
+clean_barplot_data <- function(DataSource_in, Data_starts) {
+  # Clean ground truth data
+  gt_species <- clean_species(GroundTruth$Species, "Ground Truth",
+                              Data_starts = Data_starts) %>%
+    select(-Pipeline) %>% 
+    mutate(`Pipeline & Reference Library` = "Ground Truth") %>%
+    relocate(`Pipeline & Reference Library`)
+  
+  species_clean <- lapply(names(all_species), clean_double,
+                          Data_starts = Data_starts) %>%
+    data.table::rbindlist() %>%
+    relocate(Pipeline) %>%
+    mutate(Species = base::replace(
+      Species, !(Species %in% gt_species$Species), "Incorrect ID")) %>%
+    arrange(Pipeline, Species) %>%
+    #filter(Species != "Incorrect ID") %>%
+    create_dat() %>%
+    relocate(`Pipeline & Reference Library`) %>%
+    select(-c(Pipeline, `Reference Library`, Software)) %>%
+    # Summarize everything that is incorrect
+    group_by(`Pipeline & Reference Library`, Species) %>%
+    summarise(across(everything(), sum), .groups = "drop") %>%
+    # drop Silva (no identifications)
+    filter(!(`Pipeline & Reference Library` %in% c("Mothur & SILVA", "QIIME 2 & SILVA",
+                                                   "Kraken 2 & SILVA")))
+
+  all_combine <- bind_rows(gt_species, species_clean) %>%
+    pivot_longer(cols = starts_with(Data_starts),
+                 values_to = "CPM") %>%
+    # Add relative abundance
+    group_by(`Pipeline & Reference Library`, name) %>%
+    mutate("Relative Abundance" = CPM/sum(CPM),
+           "Relative Abundance" = replace(`Relative Abundance`,
+                                          is.nan(`Relative Abundance`), 0)) %>%
+    ungroup() %>%
+    mutate(`Pipeline & Reference Library` =
+             stringr::str_replace(`Pipeline & Reference Library`,
+                                  "&", "& \n")) %>%
+    # Change factor levels 
+    mutate(Species = relevel(factor(Species), ref = "Incorrect ID"),
+           `Pipeline & Reference Library` = relevel(factor(`Pipeline & Reference Library`),
+                                                    ref = "Ground Truth"))
+  return(all_combine)
+}
+
+```
+
+## Function to create stacked barplot
+```{R}
+mk_stacked_barplot <- function(DataSource_in, Data_starts, plot_title,
+                               file_name = DataSource_in) {
+  all_combine <- clean_barplot_data(DataSource_in, Data_starts)
+  # Get polychrome kelly palette
+  kelly <- paletteer::palettes_d[["Polychrome"]]["kelly"] %>%
+      unlist() %>% unname() %>% c("grey", .)
+  kelly <- c(kelly[-2], "#6592cd")
+  
+  myplot <- all_combine %>%
+    mutate(name = factor(name, levels = unique(all_combine$name))) %>%
+    ggplot(aes(fill = Species, x = factor(name), y = `Relative Abundance`)) + 
+      geom_bar(position = "stack", stat = "identity") +
+    facet_grid(~`Pipeline & Reference Library`) +
+    theme_classic() +
+    labs(title = "Stacked bar plot of identified species",
+         subtitle = plot_title) +
+         #caption = paste0("Samples: ", paste(unique(all_combine$name),
+         #                                   collapse = ", "))) +
+    theme(legend.position = "bottom",
+          axis.title.x = element_blank(), axis.text.x = element_blank(),
+          axis.ticks.x = element_blank()) +
+    # Italicize species names!
+    theme(legend.text = element_text(face = "italic")) +
+    scale_fill_manual(values = kelly)
+  print(myplot)
+  
+  ggsave(filename = paste0(
+    stem, "/aubrey/Tyler_16S_paper/Plots/Stacked", file_name, ".png"),
+    device = "png", width = 12, height = 6, units = "in", scale = 1)
+}
+```
+
+## Create final stacked barplots
+
+Might need to identify which samples these are?
+```{R}
+mk_stacked_barplot(DataSource_in = "Kozich", Data_starts = "Koz",
+                   plot_title = "Kozich et al. (2013) samples")
+
+Fouhynames <- GroundTruth$Species %>%
+  as.data.frame() %>%
+  select(starts_with("SRR")) %>%
+  apply(2, function(x) all(x == .[, 1]))
+
+# Fouhy group 1
+mk_stacked_barplot(DataSource_in = "Fouhy",
+                   Data_starts = names(Fouhynames)[Fouhynames],
+                   plot_title = "Fouhy et al. (2016) samples")
+
+# Fouhy group 2
+mk_stacked_barplot(DataSource_in = "Fouhy",
+                   Data_starts = names(Fouhynames)[!Fouhynames],
+                   plot_title = "Fouhy et al. (2016) samples",
+                   file_name = "Fouhy2")
+
+mk_stacked_barplot(DataSource_in = "Karstens", Data_starts = c("Undiluted", "Diluted"),
+                   plot_title = "Karstens et al. (2019) samples")
+
+all_names <- metaData %>%
+  filter(DataSource == "Lluch")%>%
+  select(Sample) %>% unlist() %>% unname() %>% sort()
+
+these_names <- all_names[str_starts(all_names, "BEI")]
+mk_stacked_barplot(DataSource_in = "Lluch", Data_starts = these_names,
+                   plot_title = "Lluch et al. (2015) samples",
+                   file_name = "Lluch_BEI")
+
+these_names <- all_names[str_starts(all_names, "BL|EC")]
+mk_stacked_barplot(DataSource_in = "Lluch", Data_starts = these_names,
+                   plot_title = "Lluch et al. (2015) samples",
+                   file_name = "Lluch_BL_EC")
+
+these_names <- all_names[str_starts(all_names, "VAIO")]
+mk_stacked_barplot(DataSource_in = "Lluch", Data_starts = these_names,
+                   plot_title = "Lluch et al. (2015) samples",
+                   file_name = "Lluch_VAIO")
+
+these_names <- all_names[str_starts(all_names, "X")]
+mk_stacked_barplot(DataSource_in = "Lluch", Data_starts = these_names,
+                   plot_title = "Lluch et al. (2015) samples",
+                   file_name = "Lluch_X")
+```
+### Plot Ion Torrent data for the reviewers
+```{R}
+all_F_metadata <- read_delim("/restricted/projectnb/pathoscope/data/Mock_Fouhy/SRAinfoTable.txt", delim = "\t") %>%
+  arrange(Instrument, Library_Name)
+
+# Fouhy Illumina
+illum_samp <- c("SRR3225701", "SRR3225727", "SRR3225703")
+FouhyIllumina <- all_F_metadata %>%
+  filter(!(Run %in% illum_samp)) %>%
+  filter(Instrument == "Illumina MiSeq") %>%
+  pull(Run) %>% append(illum_samp)
+
+# Fouhy group 1
+mk_stacked_barplot(DataSource_in = "Fouhy",
+                   Data_starts = FouhyIllumina,
+                   plot_title = "Fouhy et al. (2016) Illumina samples",
+                   file_name = "Fouhy_Illumina")
+
+# Fouhy Ion Torrent
+ion_samp <- c("SRR3225708", "SRR3225713", "SRR3225719")
+FouhyION <- all_F_metadata %>%
+  filter(!(Run %in% ion_samp)) %>%
+  filter(Instrument == "Ion Torrent PGM") %>%
+  pull(Run) %>% append(ion_samp)
+
+# Fouhy group 2
+mk_stacked_barplot(DataSource_in = "Fouhy",
+                   Data_starts = FouhyION,
+                   plot_title = "Fouhy et al. (2016) Ion Torrent samples",
+                   file_name = "Fouhy_Ion")
+
+```
+
+# Sensitivity
+How many true taxa were detected?
+
+```{r}
+Sensitivity <- list()
+SensMelt <- list()
+for(taxLevel in names(mockData)){
+  Sensitivity[[taxLevel]] <- matrix(nrow = length(names(mockData[[taxLevel]])),
+                                    ncol = ncol(GroundTruth[[taxLevel]]))
+  rownames(Sensitivity[[taxLevel]]) <- names(mockData[[taxLevel]])
+  colnames(Sensitivity[[taxLevel]]) <- colnames(GroundTruth[[taxLevel]])
+  for(pipeline in names(mockData[[taxLevel]])){
+    for(sampName in colnames(Sensitivity[[taxLevel]])){
+      correctTaxa <- rownames(GroundTruth[[taxLevel]])[GroundTruth[[taxLevel]][, sampName] > 0]
+      number_Possible <- length(correctTaxa)
+      correctTaxa <- correctTaxa[correctTaxa %in% rownames(mockData[[taxLevel]][[pipeline]])]
+      Sensitivity[[taxLevel]][pipeline,sampName] <- sum(mockCPM_Clean[[taxLevel]][[pipeline]][correctTaxa, sampName] >= 1000) / number_Possible
+    }
+  }
+  SensMelt[[taxLevel]] <- melt(Sensitivity[[taxLevel]])
+  colnames(SensMelt[[taxLevel]]) <- c("Pipeline", "Sample", "value")
+  SensMelt[[taxLevel]][["DataSource"]] <- metaData[SensMelt[[taxLevel]][, "Sample"], "DataSource"]
+}
+
+buildLMEM <- function(inTable){
+  myNULL <- lmer(value ~ (1|Sample), data = inTable, REML = FALSE)
+  myLMEM <- lmer(value ~ Pipeline + (1|Sample), data = inTable, REML = FALSE)
+  tmpAnova <- anova(myNULL, myLMEM)
+  if(tmpAnova[2, 8] < 0.05){
+    leastsquare = lsmeans::lsmeans(myLMEM, pairwise ~ Pipeline, adjust = "tukey")
+    return(leastsquare$contrasts)
+  } else {
+    return(data.frame(contrast = c(NA), estimate = c(NA), SE = c(NA), df = c(NA), t.ratio = c(NA), p.value = c(NA)))
+  }
+}
+
+get_comparisons <- function(input_df, outname) {
+  for(taxLevel in names(input_df)){
+  # Average value
+  avg_value <- input_df[[taxLevel]] %>%
+    group_by(Pipeline) %>%
+    summarise("Pipeline Avg" = round(mean(value), 3),
+              "Pipeline SD" = round(sd(value), 3))
+  # Compute
+  dat <- as.data.frame(buildLMEM(input_df[[taxLevel]]))
+  dat2 <- dat %>%
+    select(contrast, estimate, p.value) %>%
+    mutate(p.value = round(p.value, 3),
+           estimate = round(estimate, 3)) %>%
+    separate(contrast, c("Pipeline", "Contrast"), sep = " - ") %>%
+    dplyr::rename("Estimated difference in means" = estimate,
+                  "Adjusted p-value" = p.value) %>%
+    full_join(., avg_value, by = "Pipeline") %>%
+    relocate(Pipeline, `Pipeline Avg`,`Pipeline SD`)
+  print(avg_value)
+  print(dat2)
+  write.csv(dat2, paste0("Tables/", outname, taxLevel, "comparisons.csv"))
+  }
+}
+```
+
+## Pairwise comparison of sensitivity
+```{R}
+get_comparisons(SensMelt, "Sensitivity")
+```
+## Plots 
+
+```{R}
+plot_16s <- function(taxLevel, input, which_type, yaxislab) {
+  this_ggdat <- input[[taxLevel]] %>%
+    tidyr::separate(col = "Pipeline", into = c("Software", "Reference Library"), remove = FALSE)
+  # Rename all pipelines
+  this_ggdat$Software <- factor(
+    this_ggdat$Software, levels = c("Mothur", "Qiime", "DADA2", "Kraken", "PS"),
+    labels = c("Mothur", "QIIME 2", "DADA2", "Kraken 2", "PathoScope"))
+  # Rename all databases
+  this_ggdat$`Reference Library` <- factor(
+    this_ggdat$`Reference Library`, levels = c("GG", "Silva", "Std", "RefSeq2018", "RefSeq2020"),
+    labels = c("Greengenes", "SILVA", "Kraken Std.", "RefSeq 2018", "RefSeq 2020"))
+  this_ggdat %<>%
+    mutate(`Pipeline & Reference Library` =
+             paste(Software, `Reference Library`, sep = " & "))
+  if (taxLevel == "Species") {
+    this_ggdat %<>% filter(!(`Pipeline & Reference Library` %in% 
+                               c("Kraken 2 & SILVA", "Mothur & SILVA",
+                                 "QIIME 2 & SILVA")))
+  }
+  # Create plot
+  dodge <- position_dodge(width = 1.0)
+  myPlot <- ggplot(this_ggdat,
+                   aes(x = `Reference Library`, y = value, col = `Reference Library`,
+                       fill = `Reference Library`)) +
+    geom_violin(position = dodge) +
+    geom_boxplot(position = dodge, outlier.colour = NULL, width = 0.1,
+                 alpha = 0.8) +
+    stat_summary(fun.y = "median", geom = "point", col = "black", shape = 10) +
+    ggtitle(paste(taxLevel, "-level ", which_type, sep = "")) +
+    ggsci::scale_color_jama() +
+    ggsci::scale_fill_jama(alpha = 0.1) +
+    labs(x = "Pipeline", y = yaxislab) +
+    facet_grid(~Software) + 
+    theme_classic() +
+    # Remove all x axis labels
+    theme(axis.title.x = element_blank(), axis.text.x = element_blank(),
+          axis.ticks.x = element_blank())
+  return(myPlot)
+  #ggsave(filename = paste0(
+  #  stem, "aubrey/Tyler_16S_paper/Plots/", which_type, taxLevel, ".png"),
+  #  device = "png", width = 7, height = 4, units = "in", scale = 0.85)
+  #print(myPlot)
+}
+
+p1 <- suppressWarnings(lapply(names(SensMelt)[1], plot_16s, input = SensMelt,
+                        which_type = "sensitivity",
+                        yaxislab = "Taxon detection sensitivity"))[[1]]
+p2 <- suppressWarnings(lapply(names(SensMelt)[2], plot_16s, input = SensMelt,
+                        which_type = "sensitivity",
+                        yaxislab = "Taxon detection sensitivity"))[[1]]
+
+```
+
+# Specificity
+
+What portion of reads are assigned to taxa which we expect to see?
+
+```{R}
+# Build the same list, but exclude all reads that don't have taxon info at the selected level
+# To do this, instead of summing up all of the reads in a table as the denominator, we exclude ones that start with a single character followed by an underscore. This will get rid of all rownames that are propagated higher taxonomic levels.
+SpecificityClean <- list()
+SpecCleanMelt <- list()
+for(taxLevel in names(mockData)){
+  SpecificityClean[[taxLevel]] <- matrix(nrow=length(names(mockData[[taxLevel]])), ncol=ncol(GroundTruth[[taxLevel]]))
+  rownames(SpecificityClean[[taxLevel]]) <- names(mockData[[taxLevel]])
+  colnames(SpecificityClean[[taxLevel]]) <- colnames(GroundTruth[[taxLevel]])
+  for(pipeline in names(mockData[[taxLevel]])){
+    for(sampName in colnames(SpecificityClean[[taxLevel]])){
+      correctTaxa <- rownames(GroundTruth[[taxLevel]])[GroundTruth[[taxLevel]][,sampName] > 0]
+      correctTaxa <- correctTaxa[correctTaxa %in% rownames(mockCPM_Clean[[taxLevel]][[pipeline]])]
+      SpecificityClean[[taxLevel]][pipeline,sampName] <- sum(mockCPM_Clean[[taxLevel]][[pipeline]][correctTaxa,sampName])/(sum(mockCPM_Clean[[taxLevel]][[pipeline]][,sampName])+0.01)#*100 # for percent
+    }
+  }
+  SpecCleanMelt[[taxLevel]] <- melt(SpecificityClean[[taxLevel]])
+  colnames(SpecCleanMelt[[taxLevel]]) <- c("Pipeline","Sample","value")
+  SpecCleanMelt[[taxLevel]][["DataSource"]] <- metaData[SpecCleanMelt[[taxLevel]][,"Sample"],"DataSource"]
+}
+```
+
+## Pairwise comparisons
+```{R}
+get_comparisons(SpecCleanMelt, "Specificity")
+```
+
+## Plots
+```{R}
+p3 <- suppressWarnings(lapply(names(SpecCleanMelt)[1], plot_16s, input = SpecCleanMelt,
+                        which_type = "specificity",
+                        yaxislab = "Read assignment specificity"))[[1]]
+p4 <- suppressWarnings(lapply(names(SpecCleanMelt)[2], plot_16s, input = SpecCleanMelt,
+                        which_type = "specificity",
+                        yaxislab = "Read assignment specificity"))[[1]]
+```
+
+# Distance (pairwise B-diversity or error) from ground truth
+```{R}
+runBray <- function(taxLevel, pipeline) {
+  myDist <- c()
+  for(sampName in colnames(mockCPM_Clean[[taxLevel]][[pipeline]])){
+    observedAbund <- data.frame(Taxon = rownames(mockCPM_Clean[[taxLevel]][[pipeline]]),
+                                CPM = mockCPM_Clean[[taxLevel]][[pipeline]][,sampName])
+    realAbund <- data.frame(Taxon = rownames(GroundTruth[[taxLevel]]),
+                            CPM=GroundTruth[[taxLevel]][,sampName])
+    bothAbund <- merge(observedAbund, realAbund, by.x = "Taxon",
+                       by.y = 0, all.x = TRUE, all.y = TRUE)
+    bothAbund[is.na(bothAbund)] <- 0
+    brayDist <- vegdist(t(bothAbund[, c(2,4)]), method="bray")
+    myDist <- c(myDist, as.numeric(brayDist))
+  }
+  return(myDist)
+}
+
+runAitchison <- function(taxLevel,pipeline){
+  myDist <- c()
+  for(sampName in colnames(mockCPM_Clean[[taxLevel]][[pipeline]])){
+    observedAbund <- data.frame(Taxon=rownames(mockCPM_Clean[[taxLevel]][[pipeline]]),CPM=mockCPM_Clean[[taxLevel]][[pipeline]][,sampName])
+    realAbund <- data.frame(Taxon=rownames(GroundTruth[[taxLevel]]),CPM=GroundTruth[[taxLevel]][,sampName])
+    bothAbund <- merge(observedAbund,realAbund,by.x="Taxon",by.y=0,all.x=TRUE,all.y=TRUE)
+    bothAbund[is.na(bothAbund)] <- 0
+    bothAbund[,c(2,4)] <- 1000000*(t(t(bothAbund[,c(2,4)]+0.01)/apply(bothAbund[,c(2,4)]+0.01,2,sum)))
+    aitchDist <- dist(t(bothAbund[,c(2,4)]),method="aitchison")
+    myDist <- c(myDist,as.numeric(aitchDist))
+  }
+  return(myDist)
+}
+
+runRRMSE <- function(taxLevel, pipeline){
+  myDist <- c()
+  for(sampName in colnames(mockData[[taxLevel]][[pipeline]])){
+    observedAbund <- data.frame(
+      Taxon = rownames(mockData[[taxLevel]][[pipeline]])[
+      mockData[[taxLevel]][[pipeline]][, sampName] > 0],
+      CPM = mockData[[taxLevel]][[pipeline]][
+        mockData[[taxLevel]][[pipeline]][, sampName] > 0, sampName])
+    
+    realAbund <- data.frame(
+      Taxon = rownames(GroundRaw[[taxLevel]])[
+      GroundRaw[[taxLevel]][,sampName] > 0],
+                            # CPM was changed to raw counts
+      raw = GroundRaw[[taxLevel]][GroundRaw[[taxLevel]][, sampName] > 0, sampName])
+    
+    bothAbund <- merge(observedAbund, realAbund, by.x = "Taxon", by.y = 0,
+                       all.x = TRUE, all.y = TRUE)
+    
+    bothAbund[is.na(bothAbund)] <- 0
+    
+    RRMSE <- sqrt(sum(apply(bothAbund[, c(2, 4)], 1,
+                            function(x){((x[1] - x[2])^2) / (mean(x))})) /
+                    sum(apply(bothAbund[, c(2, 4)], 1, sum) > 0))
+    
+    myDist <- c(myDist, as.numeric(RRMSE))
+  }
+  return(myDist)
+}
+
+runAVGRE <- function(taxLevel,pipeline){
+  myDist <- c()
+  for(sampName in colnames(mockCPM_Clean[[taxLevel]][[pipeline]])){
+    observedAbund <- data.frame(Taxon=rownames(mockCPM_Clean[[taxLevel]][[pipeline]])[mockCPM_Clean[[taxLevel]][[pipeline]][,sampName]>0],CPM=mockCPM_Clean[[taxLevel]][[pipeline]][mockCPM_Clean[[taxLevel]][[pipeline]][,sampName]>0,sampName])
+    realAbund <- data.frame(Taxon=rownames(GroundTruth[[taxLevel]])[GroundTruth[[taxLevel]][,sampName]>0],CPM=GroundTruth[[taxLevel]][GroundTruth[[taxLevel]][,sampName]>0,sampName])
+    bothAbund <- merge(observedAbund,realAbund,by.x="Taxon",by.y=0,all.x=TRUE,all.y=TRUE)
+    bothAbund[is.na(bothAbund)] <- 0
+    bothAbund[,c(2,4)] <- 1000000*(t(t(bothAbund[,c(2,4)])/apply(bothAbund[,c(2,4)],2,sum)))
+    AVGRE <- sum(apply(bothAbund[,c(2,4)],1,function(x){(abs(x[1]-x[2]))/(mean(x))}))/sum(apply(bothAbund[,c(2,4)],1,sum)>0)
+    myDist <- c(myDist,as.numeric(AVGRE))
+  }
+  return(myDist)
+}
+
+Distance <- list()
+for(taxLevel in c("Genus","Species")){
+  Distance[[taxLevel]] <- list()
+  for(Metric in c("BrayCurtis","RRMSE","AVGRE")){
+    Distance[[taxLevel]][[Metric]] <- matrix(ncol=ncol(mockCPM_Clean$Genus$Qiime_GG),
+                                             nrow=length(names(mockCPM_Clean$Genus)))
+    colnames(Distance[[taxLevel]][[Metric]]) <- colnames(mockCPM_Clean$Genus$Qiime_GG)
+    rownames(Distance[[taxLevel]][[Metric]]) <- names(mockCPM_Clean$Genus)
+    print(Metric)
+  }
+  for(pipeline in names(mockCPM_Clean[[taxLevel]])){
+    Distance[[taxLevel]][["BrayCurtis"]][pipeline,] <- runBray(taxLevel,pipeline)
+    Distance[[taxLevel]][["RRMSE"]][pipeline,] <- runRRMSE(taxLevel,pipeline)
+    Distance[[taxLevel]][["AVGRE"]][pipeline,] <- runAVGRE(taxLevel,pipeline)
+    print(pipeline)
+  }
+}
+```
+
+## Distance/error plots
+```{R}
+plot_16s_dist <- function(taxLevel, distMetric) {
+  # Get data
+  this_ggdat <- melt(Distance[[taxLevel]][[distMetric]]) %>%
+    dplyr::rename("Pipeline" = Var1, "Sample" = Var2) %>%
+    dplyr::mutate(DataSource = metaData$DataSource[.$Sample]) %>%
+    tidyr::separate(col = "Pipeline", into = c("Software", "Reference Library"), remove = FALSE)
+  # Rename all pipelines
+  this_ggdat$Software <- factor(
+    this_ggdat$Software, levels = c("Qiime", "Mothur", "Kraken", "PS", "DADA2"),
+    labels = c("QIIME 2", "Mothur", "Kraken 2", "PathoScope", "DADA2"))
+  # Rename all databases
+  this_ggdat$`Reference Library` <- factor(
+    this_ggdat$`Reference Library`, levels = c("GG", "Silva", "Std", "RefSeq2018", "RefSeq2020"),
+    labels = c("Greengenes", "SILVA", "Kraken Std.", "RefSeq 2018", "RefSeq 2020"))
+  
+  # Create plot
+  dodge <- position_dodge(width = 1.0)
+  myPlot <- ggplot(this_ggdat,
+                   aes(x = `Reference Library`, y = value, col = `Reference Library`,
+                       fill = `Reference Library`)) +
+    geom_violin(position = dodge) +
+    geom_boxplot(position = dodge, outlier.colour = NULL, width = 0.1,
+                 alpha = 0.8) +
+    stat_summary(fun.y = "median", geom = "point", col = "black", shape = 10) +
+    ggtitle(paste(taxLevel, "-level ", distMetric, sep = "")) +
+    ggsci::scale_color_jama() +
+    ggsci::scale_fill_jama(alpha = 0.1) +
+    labs(x = "Pipeline", y = "1 - BC dissimilarity") +
+    facet_grid(~Software) + 
+    theme_classic() +
+    # Remove all x axis labels
+    theme(axis.title.x = element_blank(), axis.text.x = element_blank(),
+          axis.ticks.x = element_blank())
+  ggsave(filename = paste0(
+    stem, "aubrey/Tyler_16S_paper/Plots/", distMetric, taxLevel, ".png"),
+    device = "png", width = 7, height = 4, units = "in", scale = 0.85)
+  print(myPlot)
+  
+  # Additional plot of datasource
+    # Could make this look better but is currently irrelevant
+  this_ggdat %>%
+    mutate(DataSource = factor(DataSource)) %>%
+    ggplot(aes(x = Pipeline, y = value, fill = DataSource,
+               col = DataSource)) +
+    geom_boxplot() +
+    ggtitle(paste(taxLevel, "-level ", distMetric, sep = "")) +
+    labs(subtitle = "By data source")
+}
+
+dists <- c("BrayCurtis", "RRMSE", "AVGRE")
+tax <- names(mockData)
+
+for (x in tax) {
+  for (y in dists) {
+    suppressWarnings(plot_16s_dist(taxLevel = x, distMetric = y))
+  }
+}
+
+```
+
+## Alpha Diversity estimates
+```{r, echo=FALSE, warning=FALSE, message=FALSE, results="asis"}
+num_combos <- length(names(mockData$Genus))
+
+GroundDiversity <- list()
+for(taxLevel in names(GroundRaw)){
+  GroundDiversity[[taxLevel]][["Shannon"]] <- diversity(rrarefy(ceiling(t(GroundTruth[[taxLevel]])),10000),index='shannon')
+  GroundDiversity[[taxLevel]][["Simpson"]] <- diversity(rrarefy(ceiling(t(GroundTruth[[taxLevel]])),10000),index='simpson')
+  GroundDiversity[[taxLevel]][["Chao"]] <- apply(GroundRaw[[taxLevel]], 2, 
+                                                 function(x) breakaway::breakaway_nof1(x, plot = FALSE,
+                                                                                       output = FALSE, answers = TRUE)[[1]])
+}
+Diversity <- list()
+for(taxLevel in names(GroundRaw)){
+  Diversity$Shannon[[taxLevel]] <- matrix(nrow=num_combos,ncol=136,data=NA)
+  rownames(Diversity$Shannon[[taxLevel]]) <- names(mockData[[taxLevel]])
+  colnames(Diversity$Shannon[[taxLevel]]) <- colnames(GroundTruth[[taxLevel]])
+  Diversity$Simpson[[taxLevel]] <- matrix(nrow=num_combos,ncol=136,data=NA)
+  rownames(Diversity$Simpson[[taxLevel]]) <- names(mockData[[taxLevel]])
+  colnames(Diversity$Simpson[[taxLevel]]) <- colnames(GroundTruth[[taxLevel]])
+  Diversity$Chao[[taxLevel]] <- matrix(nrow=num_combos,ncol=136,data=NA)
+  rownames(Diversity$Chao[[taxLevel]]) <- names(mockData[[taxLevel]])
+  colnames(Diversity$Chao[[taxLevel]]) <- colnames(GroundRaw[[taxLevel]])
+  for(pipeline in names(mockData[[taxLevel]])){
+    Diversity$Shannon[[taxLevel]][pipeline,] <- diversity(rrarefy(ceiling(t(mockData[[taxLevel]][[pipeline]])),10000),index='shannon')
+    Diversity$Simpson[[taxLevel]][pipeline,] <- diversity(rrarefy(ceiling(t(mockData[[taxLevel]][[pipeline]])),10000),index='simpson')
+    Diversity$Chao[[taxLevel]][pipeline,] <- apply(ceiling(mockData[[taxLevel]][[pipeline]]), 2,
+                                                   function(x) breakaway::breakaway_nof1(x,
+                                                                                         plot = FALSE, output = FALSE,
+                                                                                         answers = TRUE)[[1]])
+  }
+}
+
+#need to exclude the three monogenetic samples from analysis (BL, EC, and RP each only have 1 species, which gives a shannon/Simpson of 0)
+logDiff <- Diversity
+for(divMetric in names(logDiff)){
+  for(taxLevel in names(logDiff[[divMetric]])){
+    ind <- !colnames(Diversity[[divMetric]][[taxLevel]]) %in% 
+      c("BL","EC","RP")
+    logDiff[[divMetric]][[taxLevel]] <- log2(t(t(Diversity[[divMetric]][[taxLevel]] + 0.01) / GroundDiversity[[taxLevel]][[divMetric]]))[, ind]
+  }
+}
+
+absDiff <- Diversity
+for(divMetric in names(absDiff)){
+  for(taxLevel in names(absDiff[[divMetric]])){
+    absDiff[[divMetric]][[taxLevel]] <- abs(t(t(Diversity[[divMetric]][[taxLevel]])-GroundDiversity[[taxLevel]][[divMetric]]))[,!colnames(Diversity[[divMetric]][[taxLevel]])%in% c("BL","EC","RP")]
+  }
+}
+
+```
+
+## Diversity Plots
+```{R}
+plot_diversity <- function(input, distMetric, this_ylab = "|Measured - true index|") {
+  this_ggdat <- melt(input) %>%
+   dplyr::rename("Pipeline" = Var1, "Sample" = Var2) %>%
+    dplyr::mutate(DataSource = factor(metaData$DataSource[.$Sample])) %>%
+    tidyr::separate(col = "Pipeline", into = c("Software", "Reference Library"),
+                    remove = FALSE) %>%
+  mutate(Software = factor(Software, # Rename all pipelines
+                           levels = c("Mothur", "Qiime", "DADA2", "Kraken", "PS"),
+                           labels = c("Mothur", "QIIME 2", "DADA2", "Kraken 2", "PathoScope"))) %>%
+  mutate(`Reference Library` = factor(
+    `Reference Library`, # Rename all databases
+    levels = c("GG", "Silva", "Std", "RefSeq2018", "RefSeq2020"),
+    labels = c("Greengenes", "SILVA", "Kraken Std.", "RefSeq 2018",
+               "RefSeq 2020")))
+  this_ggdat %<>%
+    mutate(`Pipeline & Reference Library` =
+             paste(Software, `Reference Library`, sep = " & "))
+  if (taxLevel == "Species") {
+    this_ggdat %<>% filter(!(`Pipeline & Reference Library` %in% 
+                               c("Kraken 2 & SILVA", "Mothur & SILVA",
+                                 "QIIME 2 & SILVA")))
+  }
+  # Plotting
+  dodge <- position_dodge(width = 1.0)
+  myPlot <- ggplot(this_ggdat,
+                   aes(x = `Reference Library`, y = value, col = `Reference Library`,
+                       fill = `Reference Library`)) +
+    geom_violin(position = dodge) +
+    geom_boxplot(position = dodge, outlier.colour = NULL, width = 0.1,
+                 alpha = 0.8) +
+    stat_summary(fun.y = "median", geom = "point", col = "black", shape = 10) +
+    ggtitle(paste("Deviation from true", distMetric, "index")) +
+    ggsci::scale_color_jama() +
+    ggsci::scale_fill_jama(alpha = 0.1) +
+    labs(x = "Pipeline", y = this_ylab) +
+    facet_grid(~Software) + 
+    theme_classic() +
+    # Remove all x axis labels
+    theme(axis.title.x = element_blank(), axis.text.x = element_blank(),
+          axis.ticks.x = element_blank())
+  return(myPlot)
+}
+
+# Make data
+p3a <- plot_diversity(absDiff$Shannon$Species, distMetric = "Shannon",
+               this_ylab = "|Measured - true index|")
+
+plot_diversity(absDiff$Simpson$Species, distMetric = "Simpson",
+               this_ylab = "|Measured - true index|")
+
+p3b <- plot_diversity(log(absDiff$Chao$Species + 1), distMetric = "Breakaway_nof1",
+               this_ylab = "log(|Measured - true index|)")
+```
+
+## Deviation means
+```{R}
+# Shannon
+tibble(Method = rownames(absDiff$Shannon$Species),
+  "Deviation Mean" = rowMeans(absDiff$Shannon$Species),
+       "SD" = apply(absDiff$Shannon$Species, 1, sd))
+
+# Simpson
+tibble(Method = rownames(absDiff$Simpson$Species),
+  "Deviation Mean" = rowMeans(absDiff$Simpson$Species),
+       "SD" = apply(absDiff$Simpson$Species, 1, sd))
+
+# Chao
+tibble(Method = rownames(logDiff$Chao$Species),
+  "Deviation Mean" = rowMeans(logDiff$Chao$Species),
+       "SD" = apply(logDiff$Chao$Species, 1, sd)) %>%
+  arrange(`Deviation Mean`)
+```
+## Alpha diversity Pairwise comparisons
+```{R}
+Chao_melt <- vector(mode = "list", length = 2)
+names(Chao_melt) <- c("Species", "Genus")
+Chao_melt$Species <- logDiff$Chao$Species %>%
+  t() %>% as.data.frame() %>%
+  rownames_to_column(var = "Sample") %>%
+  pivot_longer(cols = !Sample, names_to = "Pipeline") %>%
+  relocate(Pipeline, Sample, value) %>% as.data.frame()
+
+Chao_melt$Genus <- logDiff$Chao$Genus %>%
+  t() %>% as.data.frame() %>%
+  rownames_to_column(var = "Sample") %>%
+  pivot_longer(cols = !Sample, names_to = "Pipeline") %>%
+  relocate(Pipeline, Sample, value) %>% as.data.frame()
+
+get_comparisons(Chao_melt, "Breakaway_nof1")
+```
+
+## Shannon Pairwise comparisons
+```{R}
+Shannon_melt <- vector(mode = "list", length = 2)
+names(Shannon_melt) <- c("Species", "Genus")
+Shannon_melt$Species <- absDiff$Shannon$Species %>%
+  t() %>% as.data.frame() %>%
+  rownames_to_column(var = "Sample") %>%
+  pivot_longer(cols = !Sample, names_to = "Pipeline") %>%
+  relocate(Pipeline, Sample, value) %>% as.data.frame()
+
+Shannon_melt$Genus <- absDiff$Shannon$Genus %>%
+  t() %>% as.data.frame() %>%
+  rownames_to_column(var = "Sample") %>%
+  pivot_longer(cols = !Sample, names_to = "Pipeline") %>%
+  relocate(Pipeline, Sample, value) %>% as.data.frame()
+
+get_comparisons(Shannon_melt, "Shannon")
+```
+
+## Simpson Pairwise comparisons
+```{R}
+Simpson_melt <- vector(mode = "list", length = 2)
+names(Simpson_melt) <- c("Species", "Genus")
+Simpson_melt$Species <- absDiff$Simpson$Species %>%
+  t() %>% as.data.frame() %>%
+  rownames_to_column(var = "Sample") %>%
+  pivot_longer(cols = !Sample, names_to = "Pipeline") %>%
+  relocate(Pipeline, Sample, value) %>% as.data.frame()
+
+Simpson_melt$Genus <- absDiff$Simpson$Genus %>%
+  t() %>% as.data.frame() %>%
+  rownames_to_column(var = "Sample") %>%
+  pivot_longer(cols = !Sample, names_to = "Pipeline") %>%
+  relocate(Pipeline, Sample, value) %>% as.data.frame()
+
+get_comparisons(Simpson_melt, "Simpson")
+```
+
+
+
+# Sensitivity by Specificity
+```{R}
+myShan <- melt(absDiff$Shannon$Species) %>%
+  dplyr::rename("Pipeline" = `Var1`, "Sample" = `Var2`)
+ind <- match(myShan$Sample, metaData$Sample)
+myShan$DataSource <- metaData$DataSource[ind]
+
+mySimp <- melt(absDiff$Simpson$Species) %>%
+  dplyr::rename("Pipeline" = `Var1`, "Sample" = `Var2`)
+ind <- match(mySimp$Sample, metaData$Sample)
+mySimp$DataSource <- metaData$DataSource[ind]
+
+myChao <- melt(log(absDiff$Chao$Species+1)) %>%
+  dplyr::rename("Pipeline" = `Var1`, "Sample" = `Var2`)
+ind <- match(myChao$Sample, metaData$Sample)
+myChao$DataSource <- metaData$DataSource[ind]
+```
+
+```{r}
+fullMelt <- list()
+for(taxLevel in names(mockData)){
+  fullMelt[[taxLevel]] <- cbind(SensMelt[[taxLevel]],
+                                Accuracy=melt(1-Distance[[taxLevel]]$BrayCurtis)$value,
+                                Specificity=SpecCleanMelt[[taxLevel]]$value/100,
+                                Error=melt(Distance[[taxLevel]]$RRMSE)$value)
+  colnames(fullMelt[[taxLevel]]) <- c("Pipeline","Sample","Sensitivity","DataSource","Accuracy","Specificity","Error")
+}
+
+# Shannon
+fullMelt$Species$Shannon <- -1
+for(i in 1:nrow(myShan)){
+  fullMelt$Species$Shannon[fullMelt$Species$Pipeline==myShan$Pipeline[i] & fullMelt$Species$Sample%in%myShan$Sample[i]] <- myShan$value[i]
+}
+fullMelt$Species$Shannon[fullMelt$Species$Shannon==-1] <- NA
+
+# Species
+fullMelt$Species$Chao <- -1
+for(i in 1:nrow(myChao)){
+  fullMelt$Species$Chao[fullMelt$Species$Pipeline==myChao$Pipeline[i] & fullMelt$Species$Sample%in%myChao$Sample[i]] <- myChao$value[i]
+}
+fullMelt$Species$Chao[fullMelt$Species$Chao==-1] <- NA
+
+centroids <- data.frame(Pipeline=names(mockData$Genus),
+                        Sensitivity=apply(Sensitivity$Species,1,mean, na.rm = TRUE),
+                        Specificity=apply(SpecificityClean$Species,1,mean, na.rm = TRUE)/100,
+                        Accuracy=1-apply(Distance$Species$BrayCurtis,1,mean),
+                        Error=apply(Distance$Species$RRMSE,1,mean,na.rm = TRUE),
+                        Shannon = unlist(lapply(names(mockData$Genus),
+                                                function(x) {mean(myShan$value[myShan$Pipeline == x])})),
+                        Chao = unlist(lapply(names(mockData$Genus),
+                                             function(x) {mean(log( 1 + myChao$value[myChao$Pipeline == x]))}
+                                             )))
+
+fullMelt$Species$LogError <- log(fullMelt$Species$Error+1)
+centroids$LogError <- log(centroids$Error+1)
+```
+
+```{R}
+
+fullMelt$Genus$LogError <- log(fullMelt$Genus$Error+1)
+
+centroidsGenus <- data.frame(Pipeline=names(mockData$Genus),
+                        Sensitivity=apply(Sensitivity$Genus,1,mean, na.rm = TRUE),
+                        Specificity=apply(SpecificityClean$Genus,1,mean,
+                                          na.rm = TRUE)/100,
+                        Accuracy = 1 - apply(Distance$Genus$BrayCurtis, 1,
+                                             mean, na.rm = TRUE),
+                        Error = apply(Distance$Genus$RRMSE, 1, mean, na.rm = TRUE),
+                        LogError = apply(log(Distance$Genus$RRMSE + 1), 1, mean,
+                                         na.rm = TRUE))
+
+```
+
+## Correlation
+```{R}
+stats::cor(fullMelt$Species$Sensitivity, fullMelt$Species$Specificity,
+           method = c("spearman"))
+
+stats::cor(fullMelt$Genus$Sensitivity, fullMelt$Genus$Specificity,
+           method = c("spearman"))
+```
+
+## Plot
+
+### Find colors
+```{R}
+names_label <- create_dat(fullMelt$Species) %>%
+  select(`Pipeline & Reference Library`) %>%
+  unique() %>% c() %>% unlist() %>% unname() %>%
+  sort()
+
+# Kraken - 3
+paletteer::paletteer_d("ggsci::red_material", 10, direction = -1)
+paletteer::paletteer_d("ggsci::amber_material", 10, direction = -1)
+K_col <- c("#B71C1CFF", "#FA6B7FFF", "#FF6F00FF")
+# Mothur - 1
+M_col <- "#FFB300FF"
+# PathoScope -4
+paletteer::paletteer_d("ggsci::green_material", 10, direction = -1)
+paletteer::paletteer_d("ggsci::light_green_material", 10, direction = -1)
+paletteer::paletteer_d("ggsci::blue_material", 10, direction = -1)
+P_col <- c("#1B5E20FF", "#81C784FF")
+P2_col <- c("#0D47A1FF", "#64B5F6FF")
+
+# qiime - 2
+paletteer::paletteer_d("ggsci::deep_purple_material", 10, direction = -1)
+Q_col <- c("#7E57C2FF", "#311B92FF")
+
+# dada2 color - 1
+d_col <- "chocolate4"
+
+all_cols <- c(d_col, K_col, M_col, P_col, P2_col, Q_col) %>%
+  set_names(names_label)
+```
+
+### Plotting function
+```{R}
+spec_sens_plot <- function(input, which_tax, cent) {
+  this_ggdat <- create_dat(input)
+  this_cent <- create_dat(cent)
+  if (which_tax == "Species") {
+    to_filter <- c("Kraken 2 & SILVA", "Mothur & SILVA", "QIIME 2 & SILVA")
+    this_ggdat %<>% filter(!(`Pipeline & Reference Library` %in% to_filter))
+    this_cent %<>% filter(!(`Pipeline & Reference Library` %in% to_filter))
+    all_cols %<>% subset(!(names(all_cols) %in% to_filter))
+  }
+  # Plotting
+  myPlot <- ggplot(this_ggdat,
+                   aes(x = Specificity*100, y = Sensitivity,
+                       col = `Pipeline & Reference Library`,
+                       fill = `Pipeline & Reference Library`)) +
+    # PLot points
+    geom_point(shape = 21, size = 2, alpha = 0.5) +
+    # scale_shape_manual(values = c(21, 22, 24, 3)) + 
+    geom_point(data = this_cent,
+               size = 3, stroke = 1, shape = 23, col = "black") +
+    # Labeling
+    ggtitle("Specificity vs. sensitivity") +
+    scale_color_manual(values = all_cols) +
+    scale_fill_manual(values = all_cols) +
+    #ggsci::scale_color_d3(palette = "category20") +
+    #ggsci::scale_fill_d3(palette = "category20") +
+    labs(x = "Read assignment specificity",
+         y = "Taxon detection sensitivity",
+         subtitle = paste0(which_tax, "-level")) +
+    theme_classic()
+return(myPlot)
+}
+
+p4b <- spec_sens_plot(fullMelt$Species, "Species", cent = centroids)
+p4a <- spec_sens_plot(fullMelt$Genus, "Genus", cent = centroidsGenus)
+```
+
+## Plot: accuracy vs error
+```{R}
+fullMelt$Species$logError <- log(fullMelt$Species$Error)
+centroids$logError <- apply(log(Distance$Species$RRMSE), 1, mean, na.rm = TRUE)
+
+acc_err_plot <- function(input, which_tax, cent) {
+  this_ggdat <- create_dat(input)
+  this_cent <- create_dat(cent)
+  # Plotting
+  myPlot <- ggplot(this_ggdat,
+                   aes(x = logError, y = Accuracy,
+                       col = `Pipeline & Reference Library`,
+                       fill = `Pipeline & Reference Library`)) +
+    # PLot points
+    geom_point(shape = 21, size = 2, alpha = 0.5) +
+    # scale_shape_manual(values = c(21, 22, 24, 3)) + 
+    geom_point(data = this_cent,
+               size = 3, stroke = 1, shape = 23, col = "black") +
+    # Labeling
+    ggtitle("Error vs. accuracy") +
+    #ggsci::scale_color_d3(palette = "category20") +
+    #ggsci::scale_fill_d3(palette = "category20") +
+    scale_color_manual(values = all_cols) +
+    scale_fill_manual(values = all_cols) +
+    labs(x = "log(NRMSE)", y = "1-BC dissimilarity",
+         subtitle = paste0(which_tax, "-level")) +
+    theme_classic()
+  
+  ggsave(filename = paste0(
+    stem, "aubrey/Tyler_16S_paper/Plots/", "acc_err_", which_tax, ".png"),
+    device = "png", width = 7, height = 4, units = "in", scale = 0.85)
+  print(myPlot)
+}
+
+acc_err_plot(fullMelt$Species, "Species", cent = centroids)
+```
+
+# NRMSE
+## Plot (NRMSE of 16S analysis pipelines)
+This figure does not have code as provided by Tyler, so I'm attempting to make it myself.
+
+Note that rows are removed because samples BL, EC, RP are all single-microbe samples. So diversity metrics don't work on these...
+```{R}
+plot_error <- function(input, taxa) {
+  this_ggdat <- create_dat(input, patho_n = "PathoScope")
+  # Rename all pipelines
+  this_ggdat$Software <- factor(
+    this_ggdat$Software, levels = c("Mothur", "QIIME 2", "DADA2", "Kraken 2", "PathoScope"))
+  # Rename all databases
+  this_ggdat$`Reference Library` <- factor(
+    this_ggdat$`Reference Library`, levels = c("Greengenes", "SILVA", "Kraken Std.", "RefSeq 2018", "RefSeq 2020"))
+  this_ggdat %<>%
+    mutate(`Pipeline & Reference Library` =
+             paste(Software, `Reference Library`, sep = " & "))
+  if (taxa == "Species") {
+    this_ggdat %<>% filter(!(`Pipeline & Reference Library` %in% 
+                               c("Kraken 2 & SILVA", "Mothur & SILVA",
+                                 "QIIME 2 & SILVA")))
+  }
+  # Plotting
+  dodge <- position_dodge(width = 1.0)
+  myPlot <- ggplot(this_ggdat,
+                   aes(x = `Reference Library`,
+                       y = log(Error), col = `Reference Library`,
+                       fill = `Reference Library`)) +
+    geom_violin(position = dodge) +
+    geom_boxplot(position = dodge, outlier.colour = NULL, width = 0.1,
+                 alpha = 0.8) +
+    stat_summary(fun = "median", geom = "point", col = "black", shape = 10) +
+    ggtitle(paste0(taxa, "-level log NRMSE")) +
+    ggsci::scale_color_jama() +
+    ggsci::scale_fill_jama(alpha = 0.1) +
+    labs(x = "Pipeline", y = "log NRMSE") +
+    facet_grid(~Software) + 
+    theme_classic() +
+    # Remove all x axis labels
+    theme(axis.title.x = element_blank(), axis.text.x = element_blank(),
+          axis.ticks.x = element_blank())
+  return(myPlot)
+  #ggsave(filename = paste0(
+  #  stem, "aubrey/Tyler_16S_paper/Plots/", "NRMSE", taxa, ".png"),
+  #  device = "png", width = 7, height = 4, units = "in", scale = 0.85)
+  #print(myPlot)
+}
+
+p5 <- plot_error(fullMelt$Species, "Species")
+p6 <- plot_error(fullMelt$Genus, "Genus")
+```
+
+## Pairwise comparison (NRMSE)
+```{R}
+input_dat <- vector(mode = "list", length = 2)
+names(input_dat) <- names(fullMelt)
+for(taxLevel in names(fullMelt)){
+  input_dat[[taxLevel]] <- fullMelt[[taxLevel]] %>%
+    select(Pipeline, Sample, value = LogError, DataSource)
+}
+
+get_comparisons(input_dat, "NRMSE")
+```
+
+## Inverse correlation
+```{R}
+# Use spearman for not nec. linear
+cor(fullMelt$Species$Chao, log(fullMelt$Species$LogError),
+    use = "pairwise.complete.obs",
+    method = "spearman")
+```
+
+# breakaway_nof1 Error plot
+
+Note that rows are removed because samples BL, EC, RP are all single-microbe samples. So diversity metrics don't work on these...
+```{R}
+breakaway_err_plot <- function(input, which_tax, cent) {
+  this_ggdat <- create_dat(input) %>%
+    mutate(Chao = log(Chao + 1))
+  this_cent <- create_dat(cent)
+
+  if (which_tax == "Species") {
+    to_filter <- c("Kraken 2 & SILVA", "Mothur & SILVA", "QIIME 2 & SILVA")
+    this_ggdat %<>% filter(!(`Pipeline & Reference Library` %in% to_filter))
+    this_cent %<>% filter(!(`Pipeline & Reference Library` %in% to_filter))
+    all_cols %<>% subset(!(names(all_cols) %in% to_filter))
+  }
+  # Plotting
+  myPlot <- ggplot(this_ggdat,
+                   aes(x = logError, y = Chao,
+                       col = `Pipeline & Reference Library`,
+                       fill = `Pipeline & Reference Library`)) +
+    # PLot points
+    geom_point(shape = 21, size = 2, alpha = 0.5) +
+    geom_point(data = this_cent,
+               size = 3, stroke = 1, shape = 23, col = "black") +
+    # Labeling
+    ggtitle("Error vs. Breakaway_nof1 diversity deviation") +
+    #ggsci::scale_color_d3(palette = "category20") +
+    #ggsci::scale_fill_d3(palette = "category20") +
+    scale_color_manual(values = all_cols) +
+    scale_fill_manual(values = all_cols) +
+    labs(x = "log(NRMSE)", y = "log(|Measured - true Breakaway_nof1 index|)",
+         subtitle = paste0(which_tax, "-level")) +
+    theme_classic()
+  return(myPlot)
+}
+
+p4c <- breakaway_err_plot(fullMelt$Species, "Species", cent = centroids)
+```
+
+# Figure grids
+## Figure 2
+```{R}
+arranged_grob <- gridExtra::arrangeGrob(p1, p2, p3, p4, p6, p5, nrow = 3, ncol = 2)
+ggsave("~/pathoscope/work/aubrey/Tyler_16S_paper/Plots/figure_grid.png", arranged_grob, width = 12.5, height = 8)
+```
+
+## Figure 3
+```{R}
+arranged_grob_f3 <- gridExtra::arrangeGrob(p3a, p3b, nrow = 1, ncol = 2)
+ggsave("~/pathoscope/work/aubrey/Tyler_16S_paper/Plots/figure3_grid.png", arranged_grob_f3, width = 11, height = 3.5)
+```
+
+## Figure 4
+```{R}
+arranged_grob_f4 <- gridExtra::arrangeGrob(p4a, p4b, p4c, nrow = 2, ncol = 2)
+ggsave("~/pathoscope/work/aubrey/Tyler_16S_paper/Plots/figure4_grid.png", arranged_grob_f4, width = 12, height = 8)
+```
