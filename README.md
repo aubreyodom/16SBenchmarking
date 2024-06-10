@@ -3,7 +3,7 @@
 
 This respository contains links to relevant files for the Faits and Odom-Mabey et al. 16S pipeline benchmarking paper.
 
-NOTE: Custom indices used in this paper were recently deleted from Google Drive (June 2024) due to space constraints on university-affiliated accounts. If you are interested in accessing the indices we used, please send us an email and we will do our best to get them to you.
+NOTE: Custom indices used in this paper were recently deleted from Google Drive (June 2024) due to space constraints on university-affiliated accounts. If you are interested in accessing the indices we used, please send us an email.
 
 ## Adapted reference libraries
 
